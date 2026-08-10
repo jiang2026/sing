@@ -143,10 +143,14 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 			return tcpConn, nil
 		}
 		// 修复 sing-box SOCKS5 UDP ASSOCIATE bug：
-		// 服务器返回的 Bind 地址常为 0.0.0.0，此时用 TCP 连接的服务器地址作为 UDP relay 地址
+		// 服务器返回的 Bind 地址常为 0.0.0.0，此时用 TCP 连接的服务器 IP + Bind 端口作为 UDP relay
 		relay := response.Bind
 		if !relay.Addr.IsValid() || relay.Addr.IsUnspecified() || relay.Addr.IsLoopback() {
-			relay = M.SocksaddrFrom(c.serverAddr.Addr, relay.Port)
+			if relay.Port == 0 {
+				relay = c.serverAddr
+			} else {
+				relay = M.SocksaddrFrom(c.serverAddr.Addr, relay.Port)
+			}
 		}
 		udpConn, err := c.dialer.DialContext(ctx, N.NetworkUDP, relay)
 		if err != nil {
