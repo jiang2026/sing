@@ -17,6 +17,16 @@ func LocalAddrs() ([]netip.Addr, error) {
 }
 
 func IsPublicAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	// RFC 6598 Shared Address Space (CGNAT)，Go IsPrivate 不含此段
+	if addr.Is4() {
+		a4 := addr.As4()
+		if a4[0] == 100 && a4[1] >= 64 && a4[1] <= 127 {
+			return false
+		}
+	}
 	return !(addr.IsPrivate() ||
 		addr.IsLoopback() ||
 		addr.IsMulticast() ||

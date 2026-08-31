@@ -142,15 +142,24 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 		if command == socks5.CommandConnect {
 			return tcpConn, nil
 		}
-		// 修复 sing-box SOCKS5 UDP ASSOCIATE bug：
-		// 服务器返回的 Bind 地址常为 0.0.0.0，此时用 TCP 连接的服务器 IP + Bind 端口作为 UDP relay
+		// 修复 SOCKS5 UDP ASSOCIATE：Bind 若为客户端不可达地址，改用「本次 TCP 已连上的对端 IP」+ Bind 端口。
+		// 覆盖：未指定 / 回环 / RFC1918 / IPv6 ULA / 链路本地 / 组播 / CGNAT 100.64.0.0/10
+		// 不用 c.serverAddr 的域名再去 DNS：TCP 已握手，RemoteAddr 即实际 IP，零额外解析。
 		relay := response.Bind
-		if !relay.Addr.IsValid() || relay.Addr.IsUnspecified() || relay.Addr.IsLoopback() {
-			if relay.Port == 0 {
-				relay = c.serverAddr
-			} else {
-				relay = M.SocksaddrFrom(c.serverAddr.Addr, relay.Port)
+		if !relay.Addr.IsValid() || !N.IsPublicAddr(relay.Addr) {
+			tcpRemote := M.SocksaddrFromNet(tcpConn.RemoteAddr()).Unwrap()
+			if !tcpRemote.Addr.IsValid() {
+				tcpConn.Close()
+				return nil, E.New("socks5: udp associate: cannot resolve relay from tcp remote ", tcpConn.RemoteAddr())
 			}
+			port := relay.Port
+			if port == 0 {
+				port = tcpRemote.Port
+			}
+			if port == 0 {
+				port = c.serverAddr.Port
+			}
+			relay = M.SocksaddrFrom(tcpRemote.Addr, port)
 		}
 		udpConn, err := c.dialer.DialContext(ctx, N.NetworkUDP, relay)
 		if err != nil {
