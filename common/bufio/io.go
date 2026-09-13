@@ -29,7 +29,8 @@ func ReadBufferSize(reader io.Reader, bufferSize int) (buffer *buf.Buffer, err e
 	readWaiter, isReadWaiter := CreateReadWaiter(reader)
 	if isReadWaiter {
 		readWaiter.InitializeReadWaiter(N.ReadWaitOptions{
-			MTU: bufferSize,
+			MTU:          bufferSize,
+			ReadOverhead: N.CalculateReaderOverhead(reader),
 		})
 		return readWaiter.WaitReadBuffer()
 	}
@@ -50,7 +51,8 @@ func ReadPacketSize(reader N.PacketReader, packetSize int) (buffer *buf.Buffer, 
 	readWaiter, isReadWaiter := CreatePacketReadWaiter(reader)
 	if isReadWaiter {
 		readWaiter.InitializeReadWaiter(N.ReadWaitOptions{
-			MTU: packetSize,
+			MTU:          packetSize,
+			ReadOverhead: N.CalculateReaderOverhead(reader),
 		})
 		buffer, destination, err = readWaiter.WaitReadPacket()
 		return

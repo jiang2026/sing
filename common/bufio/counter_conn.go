@@ -83,6 +83,33 @@ func (c *CounterConn) WriteBuffer(buffer *buf.Buffer) error {
 	return nil
 }
 
+func (c *CounterConn) CreateVectorisedWriter() (N.VectorisedWriter, bool) {
+	writer, created := CreateVectorisedWriter(c.ExtendedConn)
+	if !created {
+		return nil, false
+	}
+	return &counterVectorisedWriter{writer, c.writeCounter}, true
+}
+
+type counterVectorisedWriter struct {
+	writer       N.VectorisedWriter
+	writeCounter []N.CountFunc
+}
+
+func (w *counterVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
+	dataLen := int64(buf.LenMulti(buffers))
+	err := w.writer.WriteVectorised(buffers)
+	if err != nil {
+		return err
+	}
+	if dataLen > 0 {
+		for _, counter := range w.writeCounter {
+			counter(dataLen)
+		}
+	}
+	return nil
+}
+
 func (c *CounterConn) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return c.ExtendedConn, c.readCounter
 }

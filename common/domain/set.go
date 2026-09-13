@@ -2,9 +2,9 @@ package domain
 
 import (
 	"encoding/binary"
-	"io"
 	"math/bits"
 
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/varbin"
 )
 
@@ -47,28 +47,31 @@ func newSuccinctSet(keys []string) *succinctSet {
 func (ss *succinctSet) keys() []string {
 	var result []string
 	var currentKey []byte
-	var bmIdx, nodeId int
-
-	var traverse func(int, int)
-	traverse = func(nodeId, bmIdx int) {
-		if getBit(ss.leaves, nodeId) != 0 {
+	type frame struct {
+		nodeId, bmIdx int
+	}
+	if getBit(ss.leaves, 0) != 0 {
+		result = append(result, "")
+	}
+	stack := []frame{{0, 0}}
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		if getBit(ss.labelBitmap, top.bmIdx) != 0 {
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				currentKey = currentKey[:len(currentKey)-1]
+				stack[len(stack)-1].bmIdx++
+			}
+			continue
+		}
+		currentKey = append(currentKey, ss.labels[top.bmIdx-top.nodeId])
+		nextNodeId := countZeros(ss.labelBitmap, ss.ranks, top.bmIdx+1)
+		nextBmIdx := selectIthOne(ss.labelBitmap, ss.ranks, ss.selects, nextNodeId-1) + 1
+		if getBit(ss.leaves, nextNodeId) != 0 {
 			result = append(result, string(currentKey))
 		}
-
-		for ; ; bmIdx++ {
-			if getBit(ss.labelBitmap, bmIdx) != 0 {
-				return
-			}
-			nextLabel := ss.labels[bmIdx-nodeId]
-			currentKey = append(currentKey, nextLabel)
-			nextNodeId := countZeros(ss.labelBitmap, ss.ranks, bmIdx+1)
-			nextBmIdx := selectIthOne(ss.labelBitmap, ss.ranks, ss.selects, nextNodeId-1) + 1
-			traverse(nextNodeId, nextBmIdx)
-			currentKey = currentKey[:len(currentKey)-1]
-		}
+		stack = append(stack, frame{nextNodeId, nextBmIdx})
 	}
-
-	traverse(nodeId, bmIdx)
 	return result
 }
 
@@ -77,17 +80,33 @@ func readSuccinctSet(reader varbin.Reader) (*succinctSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	leaves, err := readUint64Slice(reader)
+	leaves, err := varbin.ReadSlice[uint64](reader, binary.BigEndian)
 	if err != nil {
 		return nil, err
 	}
-	labelBitmap, err := readUint64Slice(reader)
+	labelBitmap, err := varbin.ReadSlice[uint64](reader, binary.BigEndian)
 	if err != nil {
 		return nil, err
 	}
-	labels, err := readByteSlice(reader)
+	labels, err := varbin.ReadSlice[byte](reader, binary.BigEndian)
 	if err != nil {
 		return nil, err
+	}
+	onesCount := 0
+	lastOneIndex := -1
+	for wordIndex, word := range labelBitmap {
+		onesCount += bits.OnesCount64(word)
+		if word != 0 {
+			lastOneIndex = wordIndex<<6 | (63 - bits.LeadingZeros64(word))
+		}
+	}
+	zerosCount := lastOneIndex + 1 - onesCount
+	if onesCount != zerosCount+1 || len(labels) != zerosCount {
+		return nil, E.New("domain: malformed succinct set")
+	}
+	leavesWordCount := (onesCount + 63) >> 6
+	if len(leaves) < leavesWordCount {
+		leaves = append(leaves, make([]uint64, leavesWordCount-len(leaves))...)
 	}
 	set := &succinctSet{
 		leaves:      leaves,
@@ -114,22 +133,6 @@ func (ss *succinctSet) Write(writer varbin.Writer) error {
 	return writeByteSlice(writer, ss.labels)
 }
 
-func readUint64Slice(reader varbin.Reader) ([]uint64, error) {
-	length, err := binary.ReadUvarint(reader)
-	if err != nil {
-		return nil, err
-	}
-	if length == 0 {
-		return nil, nil
-	}
-	result := make([]uint64, length)
-	err = binary.Read(reader, binary.BigEndian, result)
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
 func writeUint64Slice(writer varbin.Writer, value []uint64) error {
 	_, err := varbin.WriteUvarint(writer, uint64(len(value)))
 	if err != nil {
@@ -139,22 +142,6 @@ func writeUint64Slice(writer varbin.Writer, value []uint64) error {
 		return nil
 	}
 	return binary.Write(writer, binary.BigEndian, value)
-}
-
-func readByteSlice(reader varbin.Reader) ([]byte, error) {
-	length, err := binary.ReadUvarint(reader)
-	if err != nil {
-		return nil, err
-	}
-	if length == 0 {
-		return nil, nil
-	}
-	result := make([]byte, length)
-	_, err = io.ReadFull(reader, result)
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
 }
 
 func writeByteSlice(writer varbin.Writer, value []byte) error {

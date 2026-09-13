@@ -84,6 +84,10 @@ func (c *ChunkReader) MTU() int {
 	return c.maxChunkSize
 }
 
+func (c *ChunkReader) UpstreamReader() any {
+	return c.upstream
+}
+
 type ChunkWriter struct {
 	upstream     N.ExtendedWriter
 	maxChunkSize int

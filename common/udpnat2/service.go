@@ -15,7 +15,7 @@ import (
 )
 
 type Service struct {
-	cache   freelru.Cache[netip.AddrPort, *natConn]
+	cache   *freelru.Cache[netip.AddrPort, *natConn]
 	handler N.UDPConnectionHandlerEx
 	prepare PrepareFunc
 }
@@ -26,12 +26,7 @@ func New(handler N.UDPConnectionHandlerEx, prepare PrepareFunc, timeout time.Dur
 	if timeout == 0 {
 		panic("invalid timeout")
 	}
-	var cache freelru.Cache[netip.AddrPort, *natConn]
-	if !shared {
-		cache = common.Must1(freelru.NewSynced[netip.AddrPort, *natConn](1024, maphash.NewHasher[netip.AddrPort]().Hash32))
-	} else {
-		cache = common.Must1(freelru.NewSharded[netip.AddrPort, *natConn](1024, maphash.NewHasher[netip.AddrPort]().Hash32))
-	}
+	cache := common.Must1(freelru.New[netip.AddrPort, *natConn](1024, maphash.NewHasher[netip.AddrPort]().Hash32, shared))
 	cache.SetLifetime(timeout)
 	cache.SetHealthCheck(func(port netip.AddrPort, conn *natConn) bool {
 		select {
@@ -75,10 +70,15 @@ func (s *Service) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinati
 	readWaitOptions := conn.readWaitOptions
 	handler := conn.handler
 	conn.handlerAccess.RUnlock()
-	buffer := readWaitOptions.NewPacketBuffer()
+	var dataLen int
+	for _, bufferSlice := range bufferSlices {
+		dataLen += len(bufferSlice)
+	}
+	buffer := readWaitOptions.NewBufferSize(dataLen)
 	for _, bufferSlice := range bufferSlices {
 		buffer.Write(bufferSlice)
 	}
+	readWaitOptions.PostReturn(buffer)
 	if handler != nil {
 		handler.NewPacketEx(buffer, destination)
 		return

@@ -247,7 +247,13 @@ func HandleConnectionEx(
 			if err != nil {
 				return E.Cause(err, "socks5: write response")
 			}
-			var socksPacketConn N.PacketConn = NewAssociatePacketConn(bufio.NewServerPacketConn(udpConn), M.Socksaddr{}, conn)
+			associateConn := NewAssociatePacketConn(bufio.NewServerPacketConn(udpConn), M.Socksaddr{}, conn)
+			go func() {
+				var buffer [1]byte
+				_, _ = conn.Read(buffer[:])
+				_ = associateConn.Close()
+			}()
+			var socksPacketConn N.PacketConn = associateConn
 			if udpTimeout > 0 {
 				udpConn.SetReadDeadline(time.Now().Add(udpTimeout))
 			}
@@ -255,6 +261,7 @@ func HandleConnectionEx(
 			var destination M.Socksaddr
 			destination, err = socksPacketConn.ReadPacket(firstPacket)
 			if err != nil {
+				_ = socksPacketConn.Close()
 				return E.Cause(err, "socks5: read first packet")
 			}
 			if udpTimeout > 0 {

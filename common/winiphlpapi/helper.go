@@ -9,12 +9,18 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"slices"
+	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+
+	"golang.org/x/sys/windows"
 )
 
 func LoadEStats() error {
@@ -118,6 +124,46 @@ func FindPid(network string, source netip.AddrPort) (uint32, error) {
 }
 
 func WriteAndWaitAck(ctx context.Context, conn net.Conn, payload []byte) error {
+	syscallConn, isSyscallConn := common.Cast[syscall.Conn](conn)
+	if !isSyscallConn {
+		return writeAndWaitAckEStats(ctx, conn, payload)
+	}
+	rawConn, err := syscallConn.SyscallConn()
+	if err != nil {
+		return writeAndWaitAckEStats(ctx, conn, payload)
+	}
+	tcpInfo, err := control.Raw0(rawConn, GetTcpInfo)
+	if err != nil {
+		if E.IsMulti(err, windows.WSAEOPNOTSUPP, windows.WSAEINVAL) {
+			return writeAndWaitAckEStats(ctx, conn, payload)
+		}
+		return os.NewSyscallError("WSAIoctl", err)
+	}
+	bytesOutBefore := tcpInfo.BytesOut
+	_, err = conn.Write(payload)
+	if err != nil {
+		return err
+	}
+	return control.Raw(rawConn, func(fd uintptr) error {
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			tcpInfo, err = GetTcpInfo(fd)
+			if err != nil {
+				return os.NewSyscallError("WSAIoctl", err)
+			}
+			if tcpInfo.BytesOut >= bytesOutBefore+uint64(len(payload)) && tcpInfo.BytesInFlight == 0 {
+				return nil
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}
+
+func writeAndWaitAckEStats(ctx context.Context, conn net.Conn, payload []byte) error {
 	source := M.AddrPortFromNet(conn.LocalAddr())
 	destination := M.AddrPortFromNet(conn.RemoteAddr())
 	if source.Addr().Is4() {
@@ -125,17 +171,20 @@ func WriteAndWaitAck(ctx context.Context, conn net.Conn, payload []byte) error {
 		if err != nil {
 			return err
 		}
-		var tcpRow *MibTcpRow
-		for _, row := range tcpTable {
-			if source == netip.AddrPortFrom(DwordToAddr(row.DwLocalAddr), DwordToPort(row.DwLocalPort)) ||
-				destination == netip.AddrPortFrom(DwordToAddr(row.DwRemoteAddr), DwordToPort(row.DwRemotePort)) {
-				tcpRow = &row
-				break
-			}
+		rowIndex := slices.IndexFunc(tcpTable, func(row MibTcpRow) bool {
+			return source == netip.AddrPortFrom(DwordToAddr(row.DwLocalAddr), DwordToPort(row.DwLocalPort)) &&
+				destination == netip.AddrPortFrom(DwordToAddr(row.DwRemoteAddr), DwordToPort(row.DwRemotePort))
+		})
+		if rowIndex == -1 {
+			rowIndex = slices.IndexFunc(tcpTable, func(row MibTcpRow) bool {
+				return source == netip.AddrPortFrom(DwordToAddr(row.DwLocalAddr), DwordToPort(row.DwLocalPort)) ||
+					destination == netip.AddrPortFrom(DwordToAddr(row.DwRemoteAddr), DwordToPort(row.DwRemotePort))
+			})
 		}
-		if tcpRow == nil {
+		if rowIndex == -1 {
 			return E.New("row not found for: ", source)
 		}
+		tcpRow := &tcpTable[rowIndex]
 		err = SetPerTcpConnectionEStatsSendBuffer(tcpRow, &TcpEstatsSendBuffRwV0{
 			EnableCollection: true,
 		})
@@ -169,17 +218,20 @@ func WriteAndWaitAck(ctx context.Context, conn net.Conn, payload []byte) error {
 		if err != nil {
 			return err
 		}
-		var tcpRow *MibTcp6Row
-		for _, row := range tcpTable {
-			if source == netip.AddrPortFrom(netip.AddrFrom16(row.LocalAddr), DwordToPort(row.LocalPort)) ||
-				destination == netip.AddrPortFrom(netip.AddrFrom16(row.RemoteAddr), DwordToPort(row.RemotePort)) {
-				tcpRow = &row
-				break
-			}
+		rowIndex := slices.IndexFunc(tcpTable, func(row MibTcp6Row) bool {
+			return source == netip.AddrPortFrom(netip.AddrFrom16(row.LocalAddr), DwordToPort(row.LocalPort)) &&
+				destination == netip.AddrPortFrom(netip.AddrFrom16(row.RemoteAddr), DwordToPort(row.RemotePort))
+		})
+		if rowIndex == -1 {
+			rowIndex = slices.IndexFunc(tcpTable, func(row MibTcp6Row) bool {
+				return source == netip.AddrPortFrom(netip.AddrFrom16(row.LocalAddr), DwordToPort(row.LocalPort)) ||
+					destination == netip.AddrPortFrom(netip.AddrFrom16(row.RemoteAddr), DwordToPort(row.RemotePort))
+			})
 		}
-		if tcpRow == nil {
+		if rowIndex == -1 {
 			return E.New("row not found for: ", source)
 		}
+		tcpRow := &tcpTable[rowIndex]
 		err = SetPerTcp6ConnectionEStatsSendBuffer(tcpRow, &TcpEstatsSendBuffRwV0{
 			EnableCollection: true,
 		})

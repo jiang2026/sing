@@ -120,6 +120,10 @@ func (c *AssociatePacketConn) FrontHeadroom() int {
 	return 3 + M.MaxSocksaddrLength
 }
 
+func (c *AssociatePacketConn) ReaderOverhead() int {
+	return 3 + M.MaxSocksaddrLength
+}
+
 func (c *AssociatePacketConn) Close() error {
 	return common.Close(
 		c.conn,

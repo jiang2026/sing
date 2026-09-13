@@ -1,8 +1,6 @@
 package canceler
 
 import (
-	"time"
-
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -54,35 +52,21 @@ func (w *timeoutPacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions
 
 func (w *timeoutPacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {
 	for {
-		now := time.Now()
-		nowNano := now.UnixNano()
-		if nowNano >= w.nextDeadlineRefresh.Load() {
-			if err = w.PacketConn.SetReadDeadline(now.Add(w.timeout)); err != nil {
-				return
-			}
-			refreshIn := w.timeout / 4
-			if refreshIn < time.Second {
-				refreshIn = time.Second
-			}
-			if refreshIn > 30*time.Second {
-				refreshIn = 30 * time.Second
-			}
-			w.nextDeadlineRefresh.Store(now.Add(refreshIn).UnixNano())
+		err = w.setReadDeadline()
+		if err != nil {
+			return
 		}
-
 		buffer, destination, err = w.readWaiter.WaitReadPacket()
 		if err == nil {
-			w.activeUnixNano.Store(time.Now().UnixNano())
+			w.updateActive()
+			return
+		} else if E.IsTimeout(err) {
+			if w.isInactive() {
+				w.cancel(err)
+				return
+			}
+		} else {
 			return
 		}
-		if !E.IsTimeout(err) {
-			return
-		}
-		active := w.activeUnixNano.Load()
-		if active == 0 || time.Since(time.Unix(0, active)) > w.timeout {
-			w.cancel(err)
-			return
-		}
-		w.nextDeadlineRefresh.Store(0)
 	}
 }
