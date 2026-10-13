@@ -145,15 +145,21 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 		// 修复 SOCKS5 UDP ASSOCIATE：Bind 若为客户端不可达地址，改用可达的服务端地址 + Bind 端口。
 		// 覆盖：未指定 / 回环 / RFC1918 / IPv6 ULA / 链路本地 / 组播 / CGNAT 100.64.0.0/10
 		//
-		// 关键：**不能无条件用 tcpConn.RemoteAddr()**。
-		// 直连时 TCP 已握手，RemoteAddr 就是服务端真实公网 IP；
-		// 但**链式(detour)时，本次 TCP 是经上游中继接出去的，RemoteAddr 是本地中继端点
-		// （loopback / 私有），拿它当 relay 会得到一个不可达地址** ——
-		// 实测：链式 UDP 时 relay 被算成 127.0.0.1:<随机端口>，UDP 报文发到第一跳的
-		// loopback 上，永远超时；而单跳 UDP 正常。这正是「链式 UDP 不通」的根因。
+		// 关键：**不能用 tcpConn.RemoteAddr() 作为 relay 的地址来源**。
 		//
-		// 因此：RemoteAddr 只有在**确实是公网地址**时才可用，否则回退到配置的服务器地址。
-		// 服务器是域名时保留 Fqdn，交给 dialer（经 detour）解析。
+		// 直连时它恰好等于服务端地址，所以看不出问题；但**链式(detour)时，本次 TCP 是
+		// 经上游第一跳接出去的，RemoteAddr 是【第一跳】的地址**。
+		// 而第一跳通常是**公网地址** —— 所以「只在 tcpRemote 非公网时才回退」这类判断
+		// 根本拦不住它，relay 会被算成「第一跳 IP + 出口端口」，UDP 报文发到错误主机。
+		//
+		// 实测（App 内探针，s5→s5 链式）：
+		//   出口跳: server=180.163.77.111:16740 tcpRemote=180.163.79.47:15970 bind=0.0.0.0:44092
+		//          → 旧逻辑 relay=180.163.79.47:44092（第一跳 IP，错误，UDP 永不达）
+		//   单节点: server=180.163.79.47:15970 tcpRemote=180.163.79.47:15970
+		//          → relay=180.163.79.47:38255（正确，只因两者相同）
+		//
+		// 因此顺序必须反过来：**优先用配置的服务器地址**；它是域名时保留 Fqdn，
+		// 交给 dialer（含 detour）解析 —— 这样经上游转发时才指向真正的出口节点。
 		relay := response.Bind
 		if !relay.Addr.IsValid() || !N.IsPublicAddr(relay.Addr) {
 			tcpRemote := M.SocksaddrFromNet(tcpConn.RemoteAddr()).Unwrap()
@@ -164,13 +170,23 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 			if port == 0 {
 				port = c.serverAddr.Port
 			}
+			// 必须优先用【配置的服务器地址】而不是 tcpRemote：
+			// 链式(detour)时 tcpRemote 是**上游中继（第一跳）**，而且它往往是公网地址，
+			// 所以「tcpRemote 是公网就采用」的判断根本拦不住它 ——
+			// 实测链式 UDP 时 relay 被算成「第一跳 IP + 出口端口」，
+			// UDP 报文发到错误的主机上，链式 UDP 永久超时。
+			//   链式出口跳: server=180.163.77.111:16740 tcpRemote=180.163.79.47:15970
+			//               bind=0.0.0.0:44092 → 错 relay=180.163.79.47:44092
+			//   单节点(对照): server=180.163.79.47:15970 tcpRemote=180.163.79.47:15970
+			//               → relay=180.163.79.47:38255（正确，因为两者相同）
+			// 用 serverAddr + bind 端口，经 dialer（含 detour）就能正确到达出口节点的 UDP relay。
 			switch {
-			case tcpRemote.Addr.IsValid() && N.IsPublicAddr(tcpRemote.Addr):
-				relay = M.SocksaddrFrom(tcpRemote.Addr, port)
 			case c.serverAddr.Addr.IsValid():
 				relay = M.SocksaddrFrom(c.serverAddr.Addr, port)
 			case c.serverAddr.Fqdn != "":
 				relay = M.Socksaddr{Fqdn: c.serverAddr.Fqdn, Port: port}
+			case tcpRemote.Addr.IsValid():
+				relay = M.SocksaddrFrom(tcpRemote.Addr, port)
 			default:
 				tcpConn.Close()
 				return nil, E.New("socks5: udp associate: cannot resolve relay address from ", tcpConn.RemoteAddr())
