@@ -142,16 +142,21 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 		if command == socks5.CommandConnect {
 			return tcpConn, nil
 		}
-		// 修复 SOCKS5 UDP ASSOCIATE：Bind 若为客户端不可达地址，改用「本次 TCP 已连上的对端 IP」+ Bind 端口。
+		// 修复 SOCKS5 UDP ASSOCIATE：Bind 若为客户端不可达地址，改用可达的服务端地址 + Bind 端口。
 		// 覆盖：未指定 / 回环 / RFC1918 / IPv6 ULA / 链路本地 / 组播 / CGNAT 100.64.0.0/10
-		// 不用 c.serverAddr 的域名再去 DNS：TCP 已握手，RemoteAddr 即实际 IP，零额外解析。
+		//
+		// 关键：**不能无条件用 tcpConn.RemoteAddr()**。
+		// 直连时 TCP 已握手，RemoteAddr 就是服务端真实公网 IP；
+		// 但**链式(detour)时，本次 TCP 是经上游中继接出去的，RemoteAddr 是本地中继端点
+		// （loopback / 私有），拿它当 relay 会得到一个不可达地址** ——
+		// 实测：链式 UDP 时 relay 被算成 127.0.0.1:<随机端口>，UDP 报文发到第一跳的
+		// loopback 上，永远超时；而单跳 UDP 正常。这正是「链式 UDP 不通」的根因。
+		//
+		// 因此：RemoteAddr 只有在**确实是公网地址**时才可用，否则回退到配置的服务器地址。
+		// 服务器是域名时保留 Fqdn，交给 dialer（经 detour）解析。
 		relay := response.Bind
 		if !relay.Addr.IsValid() || !N.IsPublicAddr(relay.Addr) {
 			tcpRemote := M.SocksaddrFromNet(tcpConn.RemoteAddr()).Unwrap()
-			if !tcpRemote.Addr.IsValid() {
-				tcpConn.Close()
-				return nil, E.New("socks5: udp associate: cannot resolve relay from tcp remote ", tcpConn.RemoteAddr())
-			}
 			port := relay.Port
 			if port == 0 {
 				port = tcpRemote.Port
@@ -159,7 +164,17 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 			if port == 0 {
 				port = c.serverAddr.Port
 			}
-			relay = M.SocksaddrFrom(tcpRemote.Addr, port)
+			switch {
+			case tcpRemote.Addr.IsValid() && N.IsPublicAddr(tcpRemote.Addr):
+				relay = M.SocksaddrFrom(tcpRemote.Addr, port)
+			case c.serverAddr.Addr.IsValid():
+				relay = M.SocksaddrFrom(c.serverAddr.Addr, port)
+			case c.serverAddr.Fqdn != "":
+				relay = M.Socksaddr{Fqdn: c.serverAddr.Fqdn, Port: port}
+			default:
+				tcpConn.Close()
+				return nil, E.New("socks5: udp associate: cannot resolve relay address from ", tcpConn.RemoteAddr())
+			}
 		}
 		udpConn, err := c.dialer.DialContext(ctx, N.NetworkUDP, relay)
 		if err != nil {
